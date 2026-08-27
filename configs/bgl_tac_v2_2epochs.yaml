@@ -1,0 +1,179 @@
+# TAC-LAnoBERT v2 — BGL (2 Epochs for Fair Comparison)
+# 
+# Extends TAC-LAnoBERT with v2 improvements:
+# - Early detection loss (penalty for late detection)
+# - Temporal features (7 types: hour, day, rates, deltas)
+# - Data augmentation (5 methods)
+# - All 16 Phase 2 improvements
+#
+# Training: 2 epochs (same as baseline for fair comparison)
+
+dataset: BGL
+run_name: bgl_tac_v2_2epochs
+
+paths:
+  raw_log: data/BGL/BGL.log
+  # split outputs (raw)
+  train_raw: data/BGL/BGL_train_normal.raw
+  test_raw: data/BGL/BGL_test.raw
+  test_label: data/BGL/BGL_test_label.log
+  # preprocessed (normalized) outputs
+  train_normal: data/BGL/BGL_train_normal_parsed.log
+  test_log: data/BGL/BGL_test_parsed.log
+  test_timestamps: data/BGL/BGL_test_parsed.timestamps  # NEW: for temporal features
+  tokenizer_dir: outputs/BGL_tac_v2_2epochs/tokenizer
+  model_dir: outputs/BGL_tac_v2_2epochs/model
+  result_dir: outputs/BGL_tac_v2_2epochs/results
+
+split:
+  method: line
+  train_ratio: 0.8
+  label_marker: "-"
+
+preprocess:
+  regex_profile: bgl
+  mask_block_id: true
+  mask_ip: true
+  mask_number: true
+  drop_header_fields: 3
+
+tokenizer:
+  vocab_size: 1000
+  min_frequency: 2
+  lowercase: false
+
+train:
+  max_len: 512
+  mlm_probability: 0.20
+  num_train_epochs: 2          # 2 epochs (same as baseline!)
+  per_device_train_batch_size: 32
+  gradient_accumulation_steps: 2
+  learning_rate: 1.0e-4
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  save_steps: 5000
+  save_total_limit: 2
+  logging_steps: 200
+  seed: 42
+  eval_ratio: 0.01
+  fp16: true
+  bf16: false
+  attn_implementation: sdpa
+
+inference:
+  hf_model: null
+  hf_subfolder: null
+  score: mean
+  top_k: 5
+  top_ks: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+  batch_size: 16
+  max_eval_samples: null
+  pretrained_model: null
+
+# ============================================================================
+# TAC-LAnoBERT Configuration (Original)
+# ============================================================================
+tac:
+  enabled: true
+  mode: full
+
+  # Time2Vec Settings
+  time2vec:
+    enabled: true
+    num_periodic: 15
+
+  # Session Memory Queue Settings
+  memory:
+    enabled: true
+    queue_capacity: 128
+    min_samples: 10
+    shrinkage_alpha: null
+
+  # Hybrid Proactive Scoring
+  scoring:
+    alpha: 0.5
+    threshold: evt
+    normalize_scores: true
+
+  # EVT/POT Dynamic Threshold
+  threshold:
+    method: evt
+    q: 0.98
+    fallback_percentile: 99.5
+
+# ============================================================================
+# TAC-LAnoBERT v2 Improvements (NEW!)
+# ============================================================================
+tac_v2:
+  enabled: true
+  
+  # Early Detection Loss
+  early_detection_loss:
+    enabled: true
+    penalty_weight: 2.0          # Penalize late detections
+    smoothness_weight: 0.1       # Encourage smooth score evolution
+    lead_time_target: 300        # Target 5 minutes lead time
+  
+  # Temporal Features (7 types)
+  temporal_features:
+    enabled: true
+    features:
+      - hour_of_day              # 0-23
+      - day_of_week              # 0-6
+      - weekend                  # Binary
+      - event_rate_5min          # Rolling 5-min rate
+      - event_rate_1hour         # Rolling 1-hour rate
+      - time_since_start         # Seconds from start
+      - time_delta               # Gap between events
+  
+  # Data Augmentation (5 methods)
+  data_augmentation:
+    enabled: true
+    ratio: 0.1                   # Generate 10% extra data
+    methods:
+      - token_replacement        # Replace tokens
+      - token_shuffling          # Shuffle order
+      - temporal_anomaly         # Inject time anomalies
+      - template_mixing          # Mix templates
+      - synthetic_sequence       # Generate sequences
+    anomaly_injection_rate: 0.3  # 30% of augmented are anomalies
+  
+  # Curriculum Learning (disabled for 2 epochs - too short)
+  curriculum_learning:
+    enabled: false               # Need 4+ epochs for curriculum
+    phases: [2, 4]               # Would use if enabled
+  
+  # Improved Scoring
+  improved_scoring:
+    enabled: true
+    use_adaptive_alpha: true     # Adaptive MLM/Mahalanobis balance
+    alpha_init: 0.9              # Start with 90% MLM
+    use_pca: true                # PCA for Mahalanobis
+    pca_components: 64           # Dimension reduction
+    covariance_method: oas       # Oracle Approximating Shrinkage
+  
+  # Threshold Optimization
+  threshold_optimization:
+    enabled: true
+    method: early_detection      # Optimize for EWR
+    target_fpr: 0.01             # Max 1% false positive rate
+    min_lead_time: 300           # Minimum 5 minutes lead time
+  
+  # Evaluation Metrics
+  evaluation:
+    compute_standard: true       # F1, Precision, Recall, AUROC
+    compute_dlt: true            # Detection Lead Time
+    dlt_intervals: [60, 300, 900, 3600]  # 1min, 5min, 15min, 1hour
+    compute_roi: true            # Business value
+    cost_per_fp: 100             # Cost per false positive
+    value_per_early_detection: 1400  # Value of early detection
+    downtime_cost_per_hour: 10000    # Cost of downtime
+    compute_alert_fatigue: true  # Alert volume analysis
+    window_sizes: ["30min", "1h", "6h"]  # Time windows
+
+# ============================================================================
+# Notes
+# ============================================================================
+# This config extends bgl_tac_full.yaml with v2 improvements
+# Training: 2 epochs (same as baseline for fair comparison)
+# Expected: F1 >0.95 (vs 0.89 baseline), EWR >20% (vs 0%)

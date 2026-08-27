@@ -1,0 +1,174 @@
+# TAC-LAnoBERT v2 Configuration for BGL Dataset
+# Integrates all improvements from PHASE4_ANALYSIS_REPORT.md
+
+# Dataset configuration
+dataset: BGL
+data_dir: data/BGL
+output_dir: outputs/BGL_tac_v2
+
+# Data split (chronological)
+split_ratios: [0.7, 0.1, 0.2]  # train, val, test
+verify_labels: true
+
+# Model architecture
+model:
+  # Base BERT
+  base_model: bert-base-uncased
+  hidden_size: 768
+  
+  # Time2Vec (improved)
+  use_time2vec: true
+  num_periodic: 15
+  use_multi_resolution: true  # hour, day, weekend, rates
+  use_time_attention: true    # Cross-attention between tokens and time
+  
+  # Memory network (differentiable)
+  use_memory: true
+  memory:
+    type: differentiable  # vs simple FIFO
+    size: 128
+    use_pca: true
+    pca_components: 64
+    covariance_estimator: oas  # OAS vs Ledoit-Wolf
+  
+  # Hierarchical temporal modeling
+  use_hierarchical: false  # Optional: log/minute/hour levels
+  hierarchical:
+    num_layers: 2
+    num_heads: 8
+
+# Scoring strategy
+scoring:
+  # Hybrid scoring
+  use_adaptive_alpha: true  # Learn alpha on validation set
+  alpha: 0.7  # Initial alpha (if not adaptive)
+  use_pca: true
+  n_components: 64
+  
+  # Alternative scoring methods
+  use_delta_mlm: true      # Change detection
+  delta_window: 50
+  
+  use_trend: true          # Temporal trend scoring
+  trend_window: 20
+  trend_weight: 0.5
+  
+  use_ensemble: true       # Ensemble across k-values
+  ensemble_k_values: [1, 2, 3, 5, 10]
+  ensemble_method: weighted_mean
+  
+  use_confidence_weighting: false  # Confidence-based alpha
+
+# Training configuration
+training:
+  # Basic settings
+  epochs: 6  # Not increasing as per requirements
+  batch_size: 32
+  gradient_accumulation_steps: 2
+  learning_rate: 5e-5
+  
+  # Learning rate schedule
+  use_warmup: true
+  warmup_epochs: 2
+  lr_scheduler: cosine  # cosine decay after warmup
+  min_lr: 0.0
+  
+  # Curriculum learning
+  use_curriculum: true
+  curriculum_phases: [2, 4]  # Phase boundaries (epochs)
+  # Phase 1 (0-2): MLM only, freeze Time2Vec
+  # Phase 2 (2-4): MLM + Time2Vec
+  # Phase 3 (4+): Full loss with early detection
+  
+  # Early stopping
+  use_early_stopping: true
+  patience: 3
+  monitor_metric: val_auroc
+  min_delta: 0.001
+  
+  # Loss weights
+  loss_weights:
+    mlm: 1.0
+    early_penalty: 0.1      # Penalize late detection
+    smoothness: 0.05        # Temporal smoothness
+    ranking: 0.05           # Monotonic increase before failures
+  
+  # Data augmentation
+  augmentation:
+    enabled: true
+    ratio: 0.1  # 10% synthetic anomalies
+    methods:
+      - replace      # Random token replacement
+      - shuffle      # Token order shuffling
+      - temporal     # Abnormal time gaps
+      - mix          # Template mixing
+
+# Threshold optimization
+threshold:
+  method: early_detection  # Optimize for EWR
+  target_fpr: 0.01        # Max 1% false positive rate
+  min_lead_time: 300      # 5 minutes minimum for "early"
+  n_candidates: 100
+
+# Evaluation metrics
+evaluation:
+  # Standard metrics
+  compute_f1: true
+  compute_auroc: true
+  compute_pr_auc: true
+  
+  # Early detection metrics
+  compute_dlt: true
+  dlt_breakdown: true  # By hour, day, etc.
+  ewr_thresholds: [60, 300, 900, 3600]  # 1min, 5min, 15min, 1hour
+  
+  # Alert fatigue metrics
+  compute_alert_fatigue: true
+  window_sizes: ['30min', '1h', '6h']  # Time windows for precision
+  compute_concentration: true
+  
+  # Business metrics
+  compute_roi: true
+  avg_failure_cost: 10000
+  cost_per_false_alarm: 100
+  mitigation_success_rate: 0.5
+
+# Business impact
+business:
+  avg_failure_cost: 10000.0      # USD
+  cost_per_false_alarm: 100.0    # USD
+  min_actionable_dlt: 300.0      # 5 minutes
+
+# Experimental settings
+experiment:
+  name: BGL_TAC_v2_full
+  description: "TAC-LAnoBERT v2 with all improvements"
+  tags:
+    - tac_v2
+    - improved_scoring
+    - curriculum_learning
+    - early_detection
+  
+  # Reproducibility
+  seed: 42
+  deterministic: true
+  
+  # Logging
+  log_interval: 100
+  save_checkpoints: true
+  checkpoint_interval: 1000
+
+# Hardware
+device: cuda
+mixed_precision: true
+num_workers: 4
+
+# Timestamp verification
+verify_timestamps: true
+timestamp_checks:
+  - monotonicity
+  - gaps
+  - duplicates
+  - coverage
+  - outliers
+  - failure_patterns

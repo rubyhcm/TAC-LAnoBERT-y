@@ -1,0 +1,99 @@
+# TAC-LAnoBERT — BGL (Full Configuration with Time2Vec + Memory Queue)
+# Extends baseline LAnoBERT with:
+# - Time2Vec embedding for temporal dynamics
+# - Session Memory Queue for continual context
+# - Hybrid Proactive Scoring (MLM + Mahalanobis)
+
+dataset: BGL
+run_name: bgl_tac_full
+
+paths:
+  raw_log: data/BGL/BGL.log
+  # split outputs (raw)
+  train_raw: data/BGL/BGL_train_normal.raw
+  test_raw: data/BGL/BGL_test.raw
+  test_label: data/BGL/BGL_test_label.log
+  # preprocessed (normalized) outputs
+  train_normal: data/BGL/BGL_train_normal_parsed.log
+  test_log: data/BGL/BGL_test_parsed.log
+  tokenizer_dir: outputs/BGL_tac/tokenizer
+  model_dir: outputs/BGL_tac/model
+  result_dir: outputs/BGL_tac/results
+
+split:
+  method: line
+  train_ratio: 0.8
+  label_marker: "-"
+
+preprocess:
+  regex_profile: bgl
+  mask_block_id: true
+  mask_ip: true
+  mask_number: true
+  drop_header_fields: 3
+
+tokenizer:
+  vocab_size: 1000
+  min_frequency: 2
+  lowercase: false
+
+train:
+  max_len: 512
+  mlm_probability: 0.20
+  num_train_epochs: 2          # Match Phase 2 baseline for fair comparison
+  per_device_train_batch_size: 32
+  gradient_accumulation_steps: 2  # Match Phase 2
+  learning_rate: 1.0e-4
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  save_steps: 5000             # Match Phase 2
+  save_total_limit: 2
+  logging_steps: 200           # Match Phase 2
+  seed: 42
+  eval_ratio: 0.01
+  fp16: true                   # Match Phase 2 (not bf16)
+  bf16: false
+  attn_implementation: sdpa
+
+inference:
+  hf_model: null
+  hf_subfolder: null
+  score: mean # Match Phase 2 baseline (error_mean uses mean aggregation)
+  top_k: 5
+  top_ks: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+  batch_size: 16
+  max_eval_samples: null
+  pretrained_model: null
+
+# ============================================================================
+# TAC-LAnoBERT Configuration
+# ============================================================================
+tac:
+  enabled: true
+  mode: full # Options: baseline | time_only | memory_only | full
+
+  # Time2Vec Settings
+  time2vec:
+    enabled: true
+    num_periodic: 15 # Number of periodic (sin) components
+    # Total Time2Vec dimension = 1 (linear) + num_periodic (sin)
+    # Projected to hidden_size (768) via linear layer
+
+  # Session Memory Queue Settings
+  memory:
+    enabled: true
+    queue_capacity: 128 # Number of [CLS] vectors to store
+    min_samples: 10 # Minimum samples before Mahalanobis is valid
+    shrinkage_alpha: null # null = auto Ledoit-Wolf estimation
+
+  # Hybrid Proactive Scoring
+  scoring:
+    alpha: 0.5 # Weight: α·MLM + (1-α)·Mahalanobis
+    threshold: evt # static | evt (Extreme Value Theory)
+    normalize_scores: true # Normalize scores to [0, 1] range
+
+  # EVT/POT Dynamic Threshold
+  threshold:
+    method: evt # evt (Extreme Value Theory) or static
+    q: 0.98 # Quantile for POT (Peaks Over Threshold)
+    fallback_percentile: 99.5 # Fallback percentile if EVT fails

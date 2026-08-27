@@ -1,0 +1,92 @@
+# TAC-LAnoBERT — BGL (Fast Local Testing Configuration)
+# This config is identical to the full Kaggle run, EXCEPT it is heavily truncated
+# to run in less than a minute on a local laptop (CPU/MPS) for debugging purposes.
+
+dataset: BGL
+run_name: bgl_tac_local_fast
+
+paths:
+  raw_log: data/BGL/BGL.log
+  # split outputs (raw)
+  train_raw: data/BGL/BGL_train_normal.raw
+  test_raw: data/BGL/BGL_test.raw
+  test_label: data/BGL/BGL_test_label.log
+  # preprocessed (normalized) outputs
+  train_normal: data/BGL/BGL_train_normal_parsed.log
+  test_log: data/BGL/BGL_test_parsed.log
+  # Output directories modified to prevent overwriting the real model
+  tokenizer_dir: outputs/BGL_tac/tokenizer
+  model_dir: outputs/BGL_tac_local/model
+  result_dir: outputs/BGL_tac_local/results
+
+split:
+  method: line
+  train_ratio: 0.8
+  label_marker: "-"
+
+preprocess:
+  regex_profile: bgl
+  mask_block_id: true
+  mask_ip: true
+  mask_number: true
+  drop_header_fields: 3
+
+tokenizer:
+  vocab_size: 1000
+  min_frequency: 2
+  lowercase: false
+
+train:
+  max_len: 512
+  mlm_probability: 0.20
+  
+  # === LOCAL FAST OVERRIDES ===
+  max_steps: 10                   # Force stop after exactly 10 training steps
+  num_train_epochs: 1             # Just 1 epoch fallback
+  per_device_train_batch_size: 2  # Tiny batch size so it doesn't crash CPU/MPS
+  per_device_eval_batch_size: 4
+  gradient_accumulation_steps: 1
+  save_steps: 5                   # Save checkpoints fast to test saving mechanism
+  save_total_limit: 1
+  logging_steps: 2                # Log frequently for visibility
+  eval_steps: 5
+  # ============================
+  
+  learning_rate: 1.0e-4
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  seed: 42
+  eval_ratio: 0.01
+  
+  # MPS (Apple Silicon Mac) prefers fp16 False or handles it internally. 
+  # HuggingFace will auto-detect MPS.
+  fp16: false
+  bf16: false
+  attn_implementation: eager      # Fallback to eager for best local compatibility
+
+inference:
+  hf_model: null
+  hf_subfolder: null
+  checkpoint: null
+  max_len: 512
+  window_size: 1
+  k_candidates: [1, 2]
+  batch_size: 16
+
+tac:
+  enabled: true
+  mode: full
+  
+  time2vec:
+    enabled: true
+    num_periodic: 5
+  
+  memory:
+    enabled: true
+    queue_capacity: 128
+    min_samples: 10
+    shrinkage_alpha: null
+    
+  scoring:
+    alpha: 0.5
+    normalize: true

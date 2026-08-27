@@ -1,0 +1,106 @@
+experiment_name: e2_memory_128
+dataset: BGL
+data:
+  train_logs: data/BGL/BGL_train_normal_parsed.log
+  test_logs: data/BGL/BGL_test_parsed.log
+  test_labels: data/BGL/BGL_test_label.log
+  test_timestamps: data/BGL/BGL_test_parsed.timestamps
+  output_dir: outputs/ablations/e6_temporal_all
+model:
+  type: tac_lanobert_v2
+  bert_model: bert-base-uncased
+  hidden_size: 768
+  num_attention_heads: 12
+  use_time2vec: true
+  use_multi_resolution: true
+  use_time_attention: true
+  use_memory: true
+  memory_size: 512
+  use_hierarchical: true
+temporal_features:
+  enabled: true
+  features:
+  - hour_of_day
+  - day_of_week
+  - weekend
+  - event_rate_5min
+  - event_rate_1hour
+  - time_since_start
+  - time_delta
+training:
+  epochs: 6
+  batch_size: 32
+  learning_rate: 2.0e-05
+  warmup_ratio: 0.1
+  gradient_accumulation_steps: 2
+  max_grad_norm: 1.0
+  use_curriculum: true
+  curriculum_phases:
+  - 2
+  - 4
+  curriculum_strategy:
+    phase1: easy_normal_only
+    phase2: medium_mild_anomalies
+    phase3: hard_full_dataset
+  use_early_stopping: true
+  early_stopping_patience: 2
+  early_stopping_metric: val_loss
+  validation_split: 0.1
+  split_method: chronological
+loss:
+  type: early_detection
+  base_loss: cross_entropy
+  penalty_weight: 2.0
+  smoothness_weight: 0.1
+  lead_time_target: 300
+  use_multi_objective: true
+  objectives:
+    detection: 1.0
+    early_warning: 0.5
+    smoothness: 0.1
+augmentation:
+  enabled: true
+  ratio: 0.2
+  methods:
+  - token_replacement
+  - token_shuffling
+  - temporal_anomaly
+  - template_mixing
+  - synthetic_sequence
+  anomaly_injection_rate: 0.3
+scoring:
+  method: adaptive_hybrid
+  use_adaptive_alpha: false
+  alpha_init: 1.0
+  use_pca: false
+  pca_components: 256
+  covariance_method: oas
+  use_delta_mlm: true
+  use_trend: true
+  trend_window: 10
+threshold:
+  method: early_detection
+  target_fpr: 0.01
+  min_lead_time: 300
+  optimize_on: validation
+  metric: ewr
+evaluation:
+  compute_standard: true
+  compute_dlt: true
+  dlt_intervals:
+  - 60
+  - 300
+  - 900
+  - 3600
+  compute_roi: true
+  cost_per_fp: 100
+  value_per_early_detection: 1400
+  downtime_cost_per_hour: 10000
+  compute_alert_fatigue: true
+  window_sizes:
+  - 30min
+  - 1h
+  - 6h
+device: cuda
+num_workers: 4
+pin_memory: true

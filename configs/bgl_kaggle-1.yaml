@@ -1,0 +1,59 @@
+# Result lần 1
+# LAnoBERT — BGL (Kaggle config)
+dataset: BGL
+run_name: bgl_kaggle
+
+paths:
+  raw_log: data/BGL/BGL.log
+  train_raw: data/BGL/BGL_train_normal.raw
+  test_raw: data/BGL/BGL_test.raw
+  test_label: data/BGL/BGL_test_label.log
+  train_normal: data/BGL/BGL_train_normal_parsed.log
+  test_log: data/BGL/BGL_test_parsed.log
+  tokenizer_dir: outputs/BGL_kaggle/tokenizer
+  model_dir: outputs/BGL_kaggle/model
+  result_dir: outputs/BGL_kaggle/results
+
+split:
+  method: line
+  train_ratio: 0.8
+  label_marker: "-"
+
+preprocess:
+  regex_profile: bgl
+  mask_block_id: true
+  mask_ip: true
+  mask_number: true
+  drop_header_fields: 3
+
+tokenizer:
+  vocab_size: 1000
+  min_frequency: 2
+  lowercase: false
+
+train:
+  max_len: 512
+  mlm_probability: 0.20
+  num_train_epochs: 1
+  per_device_train_batch_size: 32
+  gradient_accumulation_steps: 2
+  learning_rate: 2.0e-4
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  save_steps: 2000
+  save_total_limit: 1
+  logging_steps: 100
+  seed: 42
+  fp16: true
+  bf16: false
+  resume_from_checkpoint: false # bật tắt checpoint khi train
+
+inference:
+  hf_model: null
+  hf_subfolder: null
+  score: error_mean
+  top_k: 5
+  top_ks: [1, 2, 3, 4, 5]
+  batch_size: 64
+  max_eval_samples: null
+  pretrained_model: null
