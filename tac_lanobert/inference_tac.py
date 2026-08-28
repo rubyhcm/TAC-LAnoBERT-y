@@ -86,14 +86,23 @@ class LAnoBERTScorer:
             # AutoModel/AutoTokenizer so trained models of any architecture load
             # correctly (custom-vocab BERT, bert-base TAPT / random-init, ...),
             # from a local dir or the HuggingFace Hub.
-            where = f"{model_dir}" + (f"/{subfolder}" if subfolder else "")
+            
+            # Check if model is in a 'final' subdirectory (new training format)
+            final_dir = os.path.join(model_dir, "final")
+            if os.path.exists(final_dir) and os.path.isdir(final_dir):
+                actual_model_dir = final_dir
+                print(f"[infer] detected 'final' subdirectory, using '{actual_model_dir}'")
+            else:
+                actual_model_dir = model_dir
+            
+            where = f"{actual_model_dir}" + (f"/{subfolder}" if subfolder else "")
             print(f"[infer] loading trained model from '{where}'")
-            self.model = AutoModelForMaskedLM.from_pretrained(model_dir, **hub_kwargs).to(self.device)
+            self.model = AutoModelForMaskedLM.from_pretrained(actual_model_dir, **hub_kwargs).to(self.device)
             # Prefer a tokenizer saved alongside the model; fall back to a vocab file.
             if vocab_file and os.path.isfile(vocab_file):
                 self.tokenizer = load_tokenizer(vocab_file, max_len=max_len)
             else:
-                self.tokenizer = AutoTokenizer.from_pretrained(model_dir, **hub_kwargs)
+                self.tokenizer = AutoTokenizer.from_pretrained(actual_model_dir, **hub_kwargs)
 
         self.model.eval()
         self.max_len = max_len
@@ -687,9 +696,8 @@ def run(cfg) -> dict:
     if hf_model:
         model_dir = hf_model
     else:
-        model_dir = os.path.join(cfg.get_path("paths.model_dir"), "final")
-        if not os.path.isdir(model_dir):
-            model_dir = cfg.get_path("paths.model_dir")
+        # Note: LAnoBERTScorer will auto-detect 'final' subdirectory if it exists
+        model_dir = cfg.get_path("paths.model_dir")
 
     # `pretrained_model` (e.g. "bert-base-uncased") enables the training-free
     # baseline: skip from-scratch training and score with an off-the-shelf LM.
@@ -715,12 +723,17 @@ def run(cfg) -> dict:
     tac_enabled = bool(tac_cfg.get("enabled", False))
     if tac_enabled:
         print("[infer] TAC mode: Memory Queue + Hybrid Scoring")
+        
+        # Extract nested config sections
+        memory_cfg = tac_cfg.get("memory", {})
+        scoring_cfg = tac_cfg.get("scoring", {})
+        
         tac_scorer = TACInferenceScorer(
             base_scorer=base_scorer,
-            queue_capacity=int(tac_cfg.get("queue_capacity", 128)),
-            min_samples=int(tac_cfg.get("min_samples", 10)),
-            scoring_alpha=float(tac_cfg.get("scoring_alpha", 0.5)),
-            normalize_scores=bool(tac_cfg.get("normalize_scores", True)),
+            queue_capacity=int(memory_cfg.get("queue_capacity", 128)),
+            min_samples=int(memory_cfg.get("min_samples", 10)),
+            scoring_alpha=float(scoring_cfg.get("alpha", 0.5)),
+            normalize_scores=bool(scoring_cfg.get("normalize_scores", True)),
         )
 
         tac_scores = tac_scorer.score_corpus_tac(
