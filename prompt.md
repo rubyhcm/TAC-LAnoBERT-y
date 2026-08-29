@@ -76,3 +76,11 @@ bash scripts/run_phase4.sh
 ```
 
 source venv/bin/activate && python3 experiments/run_tac_v2.py --config configs/bgl_tac_v2.yaml
+
+
+```python
+!pip install faiss-cpu -q
+
+!python -m tac_lanobert.inference_tac --config configs/bgl_tac_knn.yaml
+
+```

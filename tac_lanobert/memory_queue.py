@@ -1,16 +1,30 @@
 """
-Session Memory Queue: FIFO queue with online statistics for Mahalanobis distance.
+Session Memory Queue: FIFO queue with online statistics for distance computation.
+
+Supports multiple distance metrics:
+- Mahalanobis: Uses Welford's algorithm + Ledoit-Wolf shrinkage
+- Cosine: Angle-based similarity
+- KNN: K-Nearest Neighbors distance (NEW, recommended)
 
 Uses:
 - Welford's algorithm for O(1) online mean/variance updates
 - Ledoit-Wolf shrinkage for covariance regularization
+- FAISS for efficient KNN search
 """
 
 import torch
 import numpy as np
 from collections import deque
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Literal
 from dataclasses import dataclass
+
+# Try to import FAISS for KNN support
+try:
+    import faiss
+    FAISS_AVAILABLE = True
+except ImportError:
+    FAISS_AVAILABLE = False
+    # KNN will fall back to numpy implementation
 
 
 @dataclass
@@ -30,19 +44,24 @@ class WelfordState:
 
 class SessionMemoryQueue:
     """
-    FIFO queue storing recent [CLS] vectors with online Mahalanobis distance.
+    FIFO queue storing recent [CLS] vectors with multiple distance metrics.
     
     Features:
     - FIFO queue with fixed capacity
-    - Welford's algorithm for O(1) mean/covariance updates
-    - Ledoit-Wolf shrinkage for stable covariance inversion
-    - Efficient Mahalanobis distance computation
+    - Welford's algorithm for O(1) mean/covariance updates (Mahalanobis)
+    - Ledoit-Wolf shrinkage for stable covariance inversion (Mahalanobis)
+    - KNN distance with FAISS acceleration (NEW, recommended)
+    - Efficient distance computation
     
     Args:
         capacity: Maximum queue size (default: 128)
         hidden_dim: Dimension of [CLS] vectors (default: 768)
-        min_samples: Minimum samples before computing Mahalanobis (default: 10)
-        shrinkage_alpha: Manual shrinkage coefficient (None = auto Ledoit-Wolf)
+        min_samples: Minimum samples before computing distance (default: 10)
+        shrinkage_alpha: Manual shrinkage coefficient for Mahalanobis (None = auto Ledoit-Wolf)
+        distance_metric: Distance metric to use ('mahalanobis', 'cosine', 'knn')
+        k_neighbors: Number of neighbors for KNN (default: 10)
+        aggregate_method: How to aggregate KNN distances ('mean', 'max', 'harmonic', 'median')
+        use_gpu: Whether to use GPU for FAISS (if available)
     """
     
     def __init__(
@@ -52,6 +71,11 @@ class SessionMemoryQueue:
         min_samples: int = 10,
         shrinkage_alpha: Optional[float] = None,
         cache_refresh_interval: int = 128,
+        # NEW: KNN parameters
+        distance_metric: Literal['mahalanobis', 'cosine', 'knn'] = 'mahalanobis',
+        k_neighbors: int = 10,
+        aggregate_method: Literal['mean', 'max', 'harmonic', 'median'] = 'mean',
+        use_gpu: bool = False,
     ):
         self.capacity = capacity
         self.hidden_dim = hidden_dim
@@ -66,12 +90,65 @@ class SessionMemoryQueue:
         # FIFO queue: stores [CLS] vectors as numpy arrays
         self.queue: deque = deque(maxlen=capacity)
 
-        # Welford state for online statistics
+        # Welford state for online statistics (used by Mahalanobis and Cosine)
         self.welford = WelfordState()
 
         # Cached shrunk covariance (updated lazily every cache_refresh_interval pushes)
         self._cached_cov_inv: Optional[np.ndarray] = None
         self._cache_valid = False
+        
+        # ============================================================
+        # NEW: KNN Distance Support
+        # ============================================================
+        self.distance_metric = distance_metric
+        self.k_neighbors = k_neighbors
+        self.aggregate_method = aggregate_method
+        self.use_gpu = use_gpu and torch.cuda.is_available()
+        
+        # Initialize FAISS index for KNN if metric is 'knn'
+        if distance_metric == 'knn':
+            if FAISS_AVAILABLE:
+                self._init_faiss_index()
+                print(f"✅ KNN mode enabled: k={k_neighbors}, aggregate={aggregate_method}, GPU={self.use_gpu}")
+            else:
+                print("⚠️ Warning: FAISS not available. KNN will use numpy (slower).")
+                print("   Install with: pip install faiss-cpu")
+                self.faiss_index = None
+        else:
+            self.faiss_index = None
+    
+    # ============================================================
+    # NEW: FAISS Index Management for KNN
+    # ============================================================
+    
+    def _init_faiss_index(self):
+        """Initialize FAISS index for fast nearest neighbor search"""
+        if self.use_gpu:
+            # GPU index
+            res = faiss.StandardGpuResources()
+            self.faiss_index = faiss.GpuIndexFlatL2(res, self.hidden_dim)
+        else:
+            # CPU index with L2 distance
+            self.faiss_index = faiss.IndexFlatL2(self.hidden_dim)
+    
+    def _rebuild_faiss_index(self):
+        """Rebuild FAISS index with current queue contents"""
+        if not FAISS_AVAILABLE or self.faiss_index is None:
+            return
+        
+        if len(self.queue) < self.k_neighbors:
+            return
+        
+        # Stack queue into array
+        data = np.vstack(list(self.queue)).astype('float32')
+        
+        # Reset and add
+        self.faiss_index.reset()
+        self.faiss_index.add(data)
+    
+    # ============================================================
+    # Push Method (Updated to support FAISS)
+    # ============================================================
     
     def push(self, cls_vector: torch.Tensor) -> None:
         """Add new [CLS] vector to queue and update statistics.
@@ -119,6 +196,10 @@ class SessionMemoryQueue:
         if self._push_count_since_refresh >= self.cache_refresh_interval:
             self._cache_valid = False
             self._push_count_since_refresh = 0
+        
+        # NEW: Rebuild FAISS index if using KNN
+        if self.distance_metric == 'knn':
+            self._rebuild_faiss_index()
     
     def _update_welford(self, new_sample: np.ndarray) -> None:
         """
@@ -338,10 +419,10 @@ class SessionMemoryQueue:
             cls_vector: (hidden_dim,) tensor
         
         Returns:
-            Cosine distance (float). Returns 0 if insufficient samples.
+            Cosine distance (float). Returns -1 if insufficient samples.
         """
         if len(self.queue) < self.min_samples:
-            return 0.0
+            return -1.0
         
         if isinstance(cls_vector, torch.Tensor):
             x = cls_vector.detach().cpu().numpy()
@@ -357,6 +438,153 @@ class SessionMemoryQueue:
             
         cos_sim = np.dot(x, mean) / (norm_x * norm_mean)
         return float(1.0 - cos_sim)
+    
+    # ============================================================
+    # NEW: KNN Distance Methods
+    # ============================================================
+    
+    def knn_distance(
+        self,
+        cls_vector: torch.Tensor,
+        k: Optional[int] = None,
+        aggregate: Optional[str] = None,
+    ) -> float:
+        """
+        Compute K-Nearest Neighbors distance (NEW, recommended metric).
+        
+        This method finds the k closest vectors in the queue and computes
+        an aggregate distance score. Unlike Mahalanobis (which assumes Gaussian)
+        and Cosine (which ignores magnitude), KNN captures local density without
+        distributional assumptions.
+        
+        Reference: "Out-of-Distribution Detection with Deep Nearest Neighbors" 
+                   (ICML 2022) - reduces FPR by 24.77% vs Mahalanobis
+        
+        Args:
+            cls_vector: Query vector (hidden_dim,) or (1, hidden_dim)
+            k: Number of neighbors (default: self.k_neighbors)
+            aggregate: Aggregation method (default: self.aggregate_method)
+                      'mean': Average distance to k neighbors
+                      'max': Max distance (worst-case, conservative)
+                      'harmonic': Harmonic mean (emphasizes close neighbors)
+                      'median': Median distance (robust to outliers)
+        
+        Returns:
+            KNN distance score (higher = more anomalous)
+            Returns -1 if insufficient samples
+        """
+        k = k or self.k_neighbors
+        aggregate = aggregate or self.aggregate_method
+        
+        # Check if we have enough samples
+        if len(self.queue) < k:
+            return -1.0
+        
+        # Convert to numpy
+        if isinstance(cls_vector, torch.Tensor):
+            vector = cls_vector.detach().cpu().numpy()
+        else:
+            vector = np.array(cls_vector)
+        
+        # Ensure 2D (1, dim) for FAISS
+        if vector.ndim == 1:
+            vector = vector.reshape(1, -1)
+        
+        vector = vector.astype('float32')
+        
+        # Compute distances
+        if FAISS_AVAILABLE and self.faiss_index is not None:
+            distances = self._knn_faiss(vector, k)
+        else:
+            distances = self._knn_numpy(vector, k)
+        
+        # Aggregate
+        return self._aggregate_distances(distances, aggregate)
+    
+    def _knn_faiss(self, vector: np.ndarray, k: int) -> np.ndarray:
+        """KNN search using FAISS (fast, O(log n) with GPU)"""
+        k_search = min(k, len(self.queue))
+        distances, indices = self.faiss_index.search(vector, k_search)
+        return distances[0]  # Return distances for first query
+    
+    def _knn_numpy(self, vector: np.ndarray, k: int) -> np.ndarray:
+        """KNN search using numpy (fallback, O(n))"""
+        # Stack queue
+        queue_array = np.vstack(list(self.queue))  # (N, dim)
+        
+        # Compute L2 distances
+        dists = np.linalg.norm(queue_array - vector, axis=1)  # (N,)
+        
+        # Get k smallest
+        k_search = min(k, len(self.queue))
+        k_indices = np.argpartition(dists, k_search)[:k_search]
+        k_distances = dists[k_indices]
+        
+        # Sort
+        k_distances = np.sort(k_distances)
+        
+        return k_distances
+    
+    def _aggregate_distances(self, distances: np.ndarray, method: str) -> float:
+        """
+        Aggregate k distances into single score.
+        
+        Args:
+            distances: Array of k distances
+            method: 'mean', 'max', 'harmonic', 'median'
+        
+        Returns:
+            Aggregated distance score
+        """
+        if method == 'mean':
+            # Average distance (balanced)
+            return float(np.mean(distances))
+        
+        elif method == 'max':
+            # Worst-case distance (most conservative)
+            return float(np.max(distances))
+        
+        elif method == 'harmonic':
+            # Harmonic mean: k / Σ(1/d_i)
+            # Emphasizes smaller distances
+            return float(len(distances) / np.sum(1.0 / (distances + 1e-10)))
+        
+        elif method == 'median':
+            # Robust to outlier distances
+            return float(np.median(distances))
+        
+        else:
+            raise ValueError(f"Unknown aggregation method: {method}")
+    
+    # ============================================================
+    # Generic Distance Method (Dispatches to appropriate metric)
+    # ============================================================
+    
+    def distance(self, cls_vector: torch.Tensor) -> float:
+        """
+        Compute distance using the configured metric.
+        
+        This is a convenience method that dispatches to the appropriate
+        distance function based on self.distance_metric.
+        
+        Args:
+            cls_vector: Query vector
+        
+        Returns:
+            Distance score based on configured metric
+        """
+        if self.distance_metric == 'knn':
+            return self.knn_distance(cls_vector)
+        elif self.distance_metric == 'mahalanobis':
+            return self.mahalanobis_distance(cls_vector)
+        elif self.distance_metric == 'cosine':
+            return self.cosine_distance(cls_vector)
+        else:
+            raise ValueError(f"Unknown distance metric: {self.distance_metric}")
+    
+    # ============================================================
+    # Reset and Info Methods
+    # ============================================================
     
     def reset(self) -> None:
         """Reset queue and statistics for new session."""

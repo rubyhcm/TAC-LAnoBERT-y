@@ -394,6 +394,11 @@ class TACInferenceScorer:
         scoring_alpha: float = 0.5,
         normalize_scores: bool = True,
         shrinkage_alpha: Optional[float] = None,
+        # NEW: KNN parameters
+        distance_metric: str = 'mahalanobis',  # 'mahalanobis', 'cosine', 'knn'
+        k_neighbors: int = 10,
+        aggregate_method: str = 'mean',
+        use_gpu: bool = False,
     ):
         import torch  # noqa: F401 — ensure torch is imported in this scope
         from tac_lanobert.memory_queue import SessionMemoryQueue
@@ -411,21 +416,32 @@ class TACInferenceScorer:
             else 768
         )
 
+        # NEW: Updated SessionMemoryQueue with distance metric support
         self.memory_queue = SessionMemoryQueue(
             capacity=queue_capacity,
             hidden_dim=hidden_dim,
             min_samples=min_samples,
             shrinkage_alpha=shrinkage_alpha,
+            distance_metric=distance_metric,     # NEW
+            k_neighbors=k_neighbors,             # NEW
+            aggregate_method=aggregate_method,   # NEW
+            use_gpu=use_gpu,                     # NEW
         )
         self.scorer = HybridProactiveScorer(
             alpha=scoring_alpha,
             normalize=normalize_scores,
         )
+        
+        # Store metric name for reporting
+        self.distance_metric = distance_metric
 
         print(
             f"[tac-infer] TACInferenceScorer: queue_capacity={queue_capacity} "
-            f"min_samples={min_samples} alpha={scoring_alpha}"
+            f"min_samples={min_samples} alpha={scoring_alpha} "
+            f"distance_metric={distance_metric}"  # NEW
         )
+        if distance_metric == 'knn':
+            print(f"[tac-infer]   KNN config: k={k_neighbors}, aggregate={aggregate_method}, GPU={use_gpu}")
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -558,10 +574,10 @@ class TACInferenceScorer:
             batch_size=batch_size, mask_unit=mask_unit,
         )
 
-        # 2. Extract [CLS] vector and compute Cosine distance (or Mahalanobis)
+        # 2. Extract [CLS] vector and compute distance (supports Mahal/Cosine/KNN)
         cls_np = self._extract_cls(line)
         
-        # --- Original Mahalanobis implementation (commented for reuse) ---
+        # --- Original Mahalanobis implementation (KEPT for reference) ---
         # mahal = self.memory_queue.mahalanobis_distance(cls_np)
         # self.memory_queue.push(torch.from_numpy(cls_np))
         # if mahal < 0:
@@ -575,22 +591,38 @@ class TACInferenceScorer:
         #     "hybrid": hybrid,
         # }
         # -----------------------------------------------------------------
-
-        cos_dist = self.memory_queue.cosine_distance(cls_np)
+        
+        # --- Cosine implementation (KEPT for reference) ---
+        # cos_dist = self.memory_queue.cosine_distance(cls_np)
+        # self.memory_queue.push(torch.from_numpy(cls_np))
+        # if cos_dist < 0:
+        #     hybrid = float(mlm_err)
+        # else:
+        #     hybrid = self.scorer.score(float(mlm_err), float(cos_dist))
+        # return {
+        #     "mlm_error": float(mlm_err),
+        #     "mlm_prob": float(mlm_prob),
+        #     "cosine": float(cos_dist),
+        #     "hybrid": hybrid,
+        # }
+        # -----------------------------------------------------------------
+        
+        # NEW: Generic distance method (dispatches to configured metric)
+        dist = self.memory_queue.distance(cls_np)
 
         # 3. Push [CLS] into queue (update running stats for next line)
         self.memory_queue.push(torch.from_numpy(cls_np))
 
         # 4. Hybrid score
-        if cos_dist < 0:
+        if dist < 0:
             hybrid = float(mlm_err)
         else:
-            hybrid = self.scorer.score(float(mlm_err), float(cos_dist))
+            hybrid = self.scorer.score(float(mlm_err), float(dist))
 
         return {
             "mlm_error": float(mlm_err),
             "mlm_prob": float(mlm_prob),
-            "cosine": float(cos_dist),
+            f"{self.distance_metric}_distance": float(dist),  # Dynamic key based on metric
             "hybrid": hybrid,
         }
 
@@ -638,9 +670,9 @@ class TACInferenceScorer:
         uniques = list(dict.fromkeys(lines))
         cls_cache = self._extract_cls_batch(uniques, cls_batch_size=cls_batch_size)
 
-        # ── Phase C: sequential Cosine distance + hybrid (cheap, CPU) ────────────
+        # ── Phase C: sequential distance computation + hybrid ───────────────
         
-        # --- Original Mahalanobis implementation (commented for reuse) ---
+        # --- Original Mahalanobis implementation (KEPT for reference) ---
         # mlm_errors, mlm_probs, mahals, hybrids = [], [], [], []
         # for line in tqdm(lines, desc="[tac] Mahalanobis + hybrid"):
         #     mlm_err, mlm_prob = mlm_cache[line]
@@ -666,29 +698,58 @@ class TACInferenceScorer:
         #     "hybrid": np.asarray(hybrids),
         # }
         # -----------------------------------------------------------------
-
-        mlm_errors, mlm_probs, cos_dists, hybrids = [], [], [], []
-        for line in tqdm(lines, desc="[tac] Cosine + hybrid"):
+        
+        # --- Cosine implementation (KEPT for reference) ---
+        # mlm_errors, mlm_probs, cos_dists, hybrids = [], [], [], []
+        # for line in tqdm(lines, desc="[tac] Cosine + hybrid"):
+        #     mlm_err, mlm_prob = mlm_cache[line]
+        #     cls_np = cls_cache[line]
+        #
+        #     cos_dist = self.memory_queue.cosine_distance(cls_np)
+        #     self.memory_queue.push(torch.from_numpy(cls_np))
+        #
+        #     if cos_dist < 0:
+        #         hybrid = float(mlm_err)
+        #     else:
+        #         hybrid = self.scorer.score(float(mlm_err), float(cos_dist))
+        #
+        #     mlm_errors.append(float(mlm_err))
+        #     mlm_probs.append(float(mlm_prob))
+        #     cos_dists.append(float(cos_dist))
+        #     hybrids.append(hybrid)
+        #
+        # return {
+        #     "mlm_error": np.asarray(mlm_errors),
+        #     "mlm_prob": np.asarray(mlm_probs),
+        #     "cosine": np.asarray(cos_dists),
+        #     "hybrid": np.asarray(hybrids),
+        # }
+        # -----------------------------------------------------------------
+        
+        # NEW: Generic distance method (supports all metrics)
+        mlm_errors, mlm_probs, distances, hybrids = [], [], [], []
+        desc = f"[tac] {self.distance_metric.upper()} + hybrid"
+        for line in tqdm(lines, desc=desc):
             mlm_err, mlm_prob = mlm_cache[line]
             cls_np = cls_cache[line]
 
-            cos_dist = self.memory_queue.cosine_distance(cls_np)
+            dist = self.memory_queue.distance(cls_np)
             self.memory_queue.push(torch.from_numpy(cls_np))
 
-            if cos_dist < 0:
+            if dist < 0:
                 hybrid = float(mlm_err)
             else:
-                hybrid = self.scorer.score(float(mlm_err), float(cos_dist))
+                hybrid = self.scorer.score(float(mlm_err), float(dist))
 
             mlm_errors.append(float(mlm_err))
             mlm_probs.append(float(mlm_prob))
-            cos_dists.append(float(cos_dist))
+            distances.append(float(dist))
             hybrids.append(hybrid)
 
         return {
             "mlm_error": np.asarray(mlm_errors),
             "mlm_prob": np.asarray(mlm_probs),
-            "cosine": np.asarray(cos_dists),
+            f"{self.distance_metric}_distance": np.asarray(distances),  # Dynamic key
             "hybrid": np.asarray(hybrids),
         }
 
@@ -772,12 +833,23 @@ def run(cfg) -> dict:
         memory_cfg = tac_cfg.get("memory", {})
         scoring_cfg = tac_cfg.get("scoring", {})
         
+        # NEW: Parse KNN parameters from config
+        distance_metric = memory_cfg.get("distance_metric", "mahalanobis")
+        k_neighbors = int(memory_cfg.get("k_neighbors", 10))
+        aggregate_method = memory_cfg.get("aggregate_method", "mean")
+        use_gpu = bool(memory_cfg.get("use_gpu", False))
+        
         tac_scorer = TACInferenceScorer(
             base_scorer=base_scorer,
             queue_capacity=int(memory_cfg.get("queue_capacity", 128)),
             min_samples=int(memory_cfg.get("min_samples", 10)),
             scoring_alpha=float(scoring_cfg.get("alpha", 0.5)),
             normalize_scores=bool(scoring_cfg.get("normalize_scores", True)),
+            # NEW: KNN parameters
+            distance_metric=distance_metric,
+            k_neighbors=k_neighbors,
+            aggregate_method=aggregate_method,
+            use_gpu=use_gpu,
         )
 
         tac_scores = tac_scorer.score_corpus_tac(

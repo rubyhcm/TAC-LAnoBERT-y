@@ -1,0 +1,131 @@
+# TAC-LAnoBERT — BGL with KNN Distance (Recommended)
+# Uses K-Nearest Neighbors distance instead of Mahalanobis/Cosine
+# 
+# KNN advantages:
+# - Non-parametric (no Gaussian assumption)
+# - Local density aware
+# - Proven to reduce FPR by 24.77% vs Mahalanobis (ICML 2022)
+# - No singular covariance matrix issues
+
+dataset: BGL
+run_name: bgl_tac_knn
+
+paths:
+  raw_log: data/BGL/BGL.log
+  # split outputs (raw)
+  train_raw: data/BGL/BGL_train_normal.raw
+  test_raw: data/BGL/BGL_test.raw
+  test_label: data/BGL/BGL_test_label.log
+  # preprocessed (normalized) outputs
+  train_normal: data/BGL/BGL_train_normal_parsed.log
+  test_log: data/BGL/BGL_test_parsed.log
+  tokenizer_dir: outputs/BGL_tac_knn/tokenizer
+  model_dir: outputs/BGL_tac_v2_2epochs/model  # Reuse trained model
+  result_dir: outputs/BGL_tac_knn/results
+
+split:
+  method: line
+  train_ratio: 0.8
+  label_marker: "-"
+
+preprocess:
+  regex_profile: bgl
+  mask_block_id: true
+  mask_ip: true
+  mask_number: true
+  drop_header_fields: 3
+
+tokenizer:
+  vocab_size: 1000
+  min_frequency: 2
+  lowercase: false
+
+train:
+  max_len: 512
+  mlm_probability: 0.20
+  num_train_epochs: 2
+  per_device_train_batch_size: 32
+  gradient_accumulation_steps: 2
+  learning_rate: 1.0e-4
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  save_steps: 5000
+  save_total_limit: 2
+  logging_steps: 200
+  seed: 42
+  eval_ratio: 0.01
+  fp16: true
+  bf16: false
+  attn_implementation: sdpa
+
+inference:
+  hf_model: null
+  hf_subfolder: null
+  score: mean
+  top_k: 5
+  top_ks: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+  batch_size: 16
+  max_eval_samples: null
+  pretrained_model: null
+
+# ============================================================================
+# TAC-LAnoBERT Configuration with KNN Distance
+# ============================================================================
+tac:
+  enabled: true
+  mode: full
+
+  # Time2Vec Settings (keep same as trained model)
+  time2vec:
+    enabled: true
+    num_periodic: 15
+
+  # Session Memory Queue with KNN Distance
+  memory:
+    enabled: true
+    queue_capacity: 512          # NEW: Increased from 128 for better KNN
+    min_samples: 10
+    shrinkage_alpha: null
+    
+    # ===================================================================
+    # NEW: KNN Distance Configuration
+    # ===================================================================
+    distance_metric: 'knn'       # Options: 'mahalanobis', 'cosine', 'knn'
+    k_neighbors: 10              # Number of nearest neighbors to consider
+    aggregate_method: 'mean'     # How to aggregate: 'mean', 'max', 'harmonic', 'median'
+    use_gpu: false               # Use GPU for FAISS (if available)
+    
+    # Notes on aggregation methods:
+    # - 'mean': Average distance to k neighbors (balanced, recommended)
+    # - 'max': Maximum distance (conservative, good for early detection)
+    # - 'harmonic': Harmonic mean (emphasizes closer neighbors)
+    # - 'median': Median distance (robust to outliers)
+
+  # Hybrid Proactive Scoring
+  scoring:
+    alpha: 0.8                   # 80% MLM, 20% KNN (start conservative)
+    threshold: evt
+    normalize_scores: true
+
+  # EVT/POT Dynamic Threshold
+  threshold:
+    method: evt
+    q: 0.98
+    fallback_percentile: 99.5
+
+# ============================================================================
+# Experiment Notes
+# ============================================================================
+# Expected Results (based on ICML 2022 paper):
+#   - FP reduction: 12-38% vs MLM-only baseline
+#   - Current MLM-only: FP=16, AUROC=0.999999
+#   - Target with KNN: FP ≈ 10-14, AUROC ≈ 0.999999+
+#
+# To test different configurations:
+#   1. k_neighbors: Try [5, 10, 15, 20, 30, 50]
+#   2. alpha: Try [0.7, 0.8, 0.9, 0.95]
+#   3. aggregate_method: Try all 4 methods
+#   4. queue_capacity: Try [256, 512, 1024]
+#
+# Run with:
+#   python -m tac_lanobert.inference_tac --config configs/bgl_tac_knn.yaml
