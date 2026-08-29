@@ -329,7 +329,7 @@ class SessionMemoryQueue:
         return np.sqrt(max(0.0, mahal_sq))
     
     def cosine_distance(self, cls_vector: torch.Tensor) -> float:
-        """
+        r"""
         Compute Cosine distance of new vector from queue mean.
         
         D = 1 - (x \cdot μ) / (||x|| ||μ||)
