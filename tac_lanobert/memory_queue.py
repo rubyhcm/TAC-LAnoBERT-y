@@ -328,6 +328,36 @@ class SessionMemoryQueue:
         # Return sqrt (non-negative by construction)
         return np.sqrt(max(0.0, mahal_sq))
     
+    def cosine_distance(self, cls_vector: torch.Tensor) -> float:
+        """
+        Compute Cosine distance of new vector from queue mean.
+        
+        D = 1 - (x \cdot μ) / (||x|| ||μ||)
+        
+        Args:
+            cls_vector: (hidden_dim,) tensor
+        
+        Returns:
+            Cosine distance (float). Returns 0 if insufficient samples.
+        """
+        if len(self.queue) < self.min_samples:
+            return 0.0
+        
+        if isinstance(cls_vector, torch.Tensor):
+            x = cls_vector.detach().cpu().numpy()
+        else:
+            x = np.array(cls_vector)
+            
+        mean = self.welford.mean
+        norm_x = np.linalg.norm(x)
+        norm_mean = np.linalg.norm(mean)
+        
+        if norm_x == 0 or norm_mean == 0:
+            return 1.0
+            
+        cos_sim = np.dot(x, mean) / (norm_x * norm_mean)
+        return float(1.0 - cos_sim)
+    
     def reset(self) -> None:
         """Reset queue and statistics for new session."""
         self.queue.clear()

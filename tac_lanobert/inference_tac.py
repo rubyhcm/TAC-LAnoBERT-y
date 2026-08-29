@@ -558,23 +558,39 @@ class TACInferenceScorer:
             batch_size=batch_size, mask_unit=mask_unit,
         )
 
-        # 2. Extract [CLS] vector and compute Mahalanobis
+        # 2. Extract [CLS] vector and compute Cosine distance (or Mahalanobis)
         cls_np = self._extract_cls(line)
-        mahal = self.memory_queue.mahalanobis_distance(cls_np)
+        
+        # --- Original Mahalanobis implementation (commented for reuse) ---
+        # mahal = self.memory_queue.mahalanobis_distance(cls_np)
+        # self.memory_queue.push(torch.from_numpy(cls_np))
+        # if mahal < 0:
+        #     hybrid = float(mlm_err)
+        # else:
+        #     hybrid = self.scorer.score(float(mlm_err), float(mahal))
+        # return {
+        #     "mlm_error": float(mlm_err),
+        #     "mlm_prob": float(mlm_prob),
+        #     "mahalanobis": float(mahal),
+        #     "hybrid": hybrid,
+        # }
+        # -----------------------------------------------------------------
+
+        cos_dist = self.memory_queue.cosine_distance(cls_np)
 
         # 3. Push [CLS] into queue (update running stats for next line)
         self.memory_queue.push(torch.from_numpy(cls_np))
 
         # 4. Hybrid score
-        if mahal < 0:
+        if cos_dist < 0:
             hybrid = float(mlm_err)
         else:
-            hybrid = self.scorer.score(float(mlm_err), float(mahal))
+            hybrid = self.scorer.score(float(mlm_err), float(cos_dist))
 
         return {
             "mlm_error": float(mlm_err),
             "mlm_prob": float(mlm_prob),
-            "mahalanobis": float(mahal),
+            "cosine": float(cos_dist),
             "hybrid": hybrid,
         }
 
@@ -622,29 +638,57 @@ class TACInferenceScorer:
         uniques = list(dict.fromkeys(lines))
         cls_cache = self._extract_cls_batch(uniques, cls_batch_size=cls_batch_size)
 
-        # ── Phase C: sequential Mahalanobis + hybrid (cheap, CPU) ────────────
-        mlm_errors, mlm_probs, mahals, hybrids = [], [], [], []
-        for line in tqdm(lines, desc="[tac] Mahalanobis + hybrid"):
+        # ── Phase C: sequential Cosine distance + hybrid (cheap, CPU) ────────────
+        
+        # --- Original Mahalanobis implementation (commented for reuse) ---
+        # mlm_errors, mlm_probs, mahals, hybrids = [], [], [], []
+        # for line in tqdm(lines, desc="[tac] Mahalanobis + hybrid"):
+        #     mlm_err, mlm_prob = mlm_cache[line]
+        #     cls_np = cls_cache[line]
+        #
+        #     mahal = self.memory_queue.mahalanobis_distance(cls_np)
+        #     self.memory_queue.push(torch.from_numpy(cls_np))
+        #
+        #     if mahal < 0:
+        #         hybrid = float(mlm_err)
+        #     else:
+        #         hybrid = self.scorer.score(float(mlm_err), float(mahal))
+        #
+        #     mlm_errors.append(float(mlm_err))
+        #     mlm_probs.append(float(mlm_prob))
+        #     mahals.append(float(mahal))
+        #     hybrids.append(hybrid)
+        #
+        # return {
+        #     "mlm_error": np.asarray(mlm_errors),
+        #     "mlm_prob": np.asarray(mlm_probs),
+        #     "mahalanobis": np.asarray(mahals),
+        #     "hybrid": np.asarray(hybrids),
+        # }
+        # -----------------------------------------------------------------
+
+        mlm_errors, mlm_probs, cos_dists, hybrids = [], [], [], []
+        for line in tqdm(lines, desc="[tac] Cosine + hybrid"):
             mlm_err, mlm_prob = mlm_cache[line]
             cls_np = cls_cache[line]
 
-            mahal = self.memory_queue.mahalanobis_distance(cls_np)
+            cos_dist = self.memory_queue.cosine_distance(cls_np)
             self.memory_queue.push(torch.from_numpy(cls_np))
 
-            if mahal < 0:
+            if cos_dist < 0:
                 hybrid = float(mlm_err)
             else:
-                hybrid = self.scorer.score(float(mlm_err), float(mahal))
+                hybrid = self.scorer.score(float(mlm_err), float(cos_dist))
 
             mlm_errors.append(float(mlm_err))
             mlm_probs.append(float(mlm_prob))
-            mahals.append(float(mahal))
+            cos_dists.append(float(cos_dist))
             hybrids.append(hybrid)
 
         return {
             "mlm_error": np.asarray(mlm_errors),
             "mlm_prob": np.asarray(mlm_probs),
-            "mahalanobis": np.asarray(mahals),
+            "cosine": np.asarray(cos_dists),
             "hybrid": np.asarray(hybrids),
         }
 
