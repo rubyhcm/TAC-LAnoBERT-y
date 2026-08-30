@@ -172,7 +172,7 @@ def run_e3(args):
     # Load data
     test_raw = "data/BGL/BGL_test.raw"
     test_timestamps = "data/BGL/BGL_test_parsed.timestamps"
-    tac_hybrid_scores = "outputs/BGL_tac/results/scores_tac_hybrid.npy"
+    tac_hybrid_scores = "outputs/BGL_tac_v2_2epochs/results/scores_tac_hybrid.npy"
     
     if not all(os.path.exists(f) for f in [test_raw, test_timestamps, tac_hybrid_scores]):
         print("❌ Required files not found")
@@ -220,20 +220,30 @@ def run_e3(args):
     # Calculate DLT
     print(f"\n⏱️  Calculating Detection Lead Time...")
     
-    failures = np.where(labels == 1)[0]
-    dlts = []
+    # Sort chronologically for fast search
+    sort_idx = np.argsort(timestamps)
+    timestamps_sorted = timestamps[sort_idx]
+    labels_sorted = labels[sort_idx]
+    alerts_sorted = alerts[sort_idx]
     
-    for fail_idx in failures:
-        fail_time = timestamps[fail_idx]
+    failures = np.where(labels_sorted == 1)[0]
+    fail_timestamps = timestamps_sorted[failures]
+    
+    alert_indices = np.where(alerts_sorted == 1)[0]
+    alert_timestamps = timestamps_sorted[alert_indices]
+    
+    dlts = []
+    for fail_time in fail_timestamps:
         lookback = 3600  # 1 hour
+        start_time = fail_time - lookback
         
-        # Find alerts before this failure
-        mask = (timestamps < fail_time) & (timestamps >= fail_time - lookback)
-        candidates = np.where(mask & (alerts == 1))[0]
+        # Binary search
+        idx_start = np.searchsorted(alert_timestamps, start_time, side='left')
+        idx_end = np.searchsorted(alert_timestamps, fail_time, side='left')
         
-        if len(candidates) > 0:
-            first_alert_idx = candidates[np.argmin(timestamps[candidates])]
-            dlt = fail_time - timestamps[first_alert_idx]
+        if idx_start < idx_end:
+            first_alert_time = alert_timestamps[idx_start]
+            dlt = fail_time - first_alert_time
             dlts.append(dlt)
         else:
             dlts.append(0.0)

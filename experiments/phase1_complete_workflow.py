@@ -41,7 +41,7 @@ from tac_lanobert import threshold_optimization
 def load_data() -> Tuple[np.ndarray, np.ndarray, pd.Series]:
     """Load test data and scores"""
     
-    base_path = Path('outputs/BGL_tac/results')
+    base_path = Path('outputs/BGL_tac_v2_2epochs/results')
     data_path = Path('data/BGL')
     
     print("\n" + "="*70)
@@ -64,6 +64,12 @@ def load_data() -> Tuple[np.ndarray, np.ndarray, pd.Series]:
     print(f"   Scores: mean={scores.mean():.4f}, std={scores.std():.4f}")
     print(f"   Anomalies: {labels.sum():,} ({labels.mean()*100:.1f}%)")
     print(f"   Time span: {(timestamps.max() - timestamps.min()).total_seconds()/3600:.1f} hours")
+    
+    # Ensure chronological order
+    sort_idx = np.argsort(timestamps.values)
+    scores = scores[sort_idx]
+    labels = labels[sort_idx]
+    timestamps = timestamps.iloc[sort_idx].reset_index(drop=True)
     
     return scores, labels, timestamps
 
@@ -189,12 +195,12 @@ def optimize_threshold_on_validation(
             f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
             
             candidates.append({
-                'threshold': threshold,
-                'f1': f1,
-                'precision': precision,
-                'recall': recall,
-                'fpr': fpr,
-                'tp': tp, 'fp': fp, 'tn': tn, 'fn': fn
+                'threshold': float(threshold),
+                'f1': float(f1),
+                'precision': float(precision),
+                'recall': float(recall),
+                'fpr': float(fpr),
+                'tp': int(tp), 'fp': int(fp), 'tn': int(tn), 'fn': int(fn)
             })
             
             if f1 > best_f1:
@@ -221,12 +227,12 @@ def optimize_threshold_on_validation(
         
         best_threshold = threshold
         best_metrics = {
-            'threshold': threshold,
-            'f1': f1,
-            'precision': precision,
-            'recall': recall,
-            'fpr': fpr,
-            'tp': tp, 'fp': fp, 'tn': tn, 'fn': fn
+            'threshold': float(threshold),
+            'f1': float(f1),
+            'precision': float(precision),
+            'recall': float(recall),
+            'fpr': float(fpr),
+            'tp': int(tp), 'fp': int(fp), 'tn': int(tn), 'fn': int(fn)
         }
     
     print(f"\n✅ Optimal threshold found: {best_threshold:.6f}")
@@ -352,6 +358,7 @@ def apply_alert_aggregation(
     # Use AlertAggregator
     aggregator = AlertAggregator(window_minutes=window_minutes)
     groups = aggregator.aggregate(
+        predictions=np.ones_like(alert_scores),
         scores=alert_scores,
         timestamps=alert_timestamps,
         labels=alert_labels
@@ -363,7 +370,7 @@ def apply_alert_aggregation(
     # Priority distribution
     priority_counts = {}
     for group in groups:
-        priority = group.get('priority', 'unknown')
+        priority = getattr(group, 'priority', 'unknown')
         priority_counts[priority] = priority_counts.get(priority, 0) + 1
     
     print(f"\nPriority distribution:")
@@ -379,8 +386,7 @@ def apply_alert_aggregation(
         'total_groups': len(groups),
         'reduction_ratio': float((1 - len(groups)/len(alert_indices)) * 100),
         'avg_alerts_per_group': float(avg_per_group),
-        'priority_distribution': priority_counts,
-        'groups': groups
+        'priority_distribution': priority_counts
     }
 
 

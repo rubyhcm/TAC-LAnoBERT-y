@@ -25,7 +25,7 @@ class TimestampExtractor:
     
     # Regex patterns for different log formats
     PATTERNS = {
-        'bgl': r'^-?\s*(\d{10})\s',                # Unix timestamp at start (optional -)
+        'bgl': r'^(?:-|\w+)?\s*(\d{10})\s',                # Unix timestamp at start (optional - or label)
         'thunderbird': r'^-\s+(\d{10})\s',         # Unix timestamp after "-"
         'hdfs': r'^(\d{6})\s+(\d{6})',             # YYMMDD HHMMSS
     }
