@@ -820,6 +820,29 @@ def run(cfg) -> dict:
     lines, labels = _load_test(cfg, limit=limit)
     print(f"[infer] test lines: {len(lines)}  labels: {len(labels)}")
 
+    # Try to load timestamps for DLT/EWR evaluation
+    import pandas as pd
+    from .time_delta import TimestampExtractor
+    
+    timestamps = None
+    try:
+        raw_path = cfg.get_path("paths.test_raw")
+        if os.path.exists(raw_path):
+            ts_list = []
+            extractor = TimestampExtractor(log_format=cfg.get("dataset", "bgl").lower())
+            with open(raw_path, "r", encoding="utf-8") as f:
+                for i, line in enumerate(f):
+                    if limit and i >= limit:
+                        break
+                    ts_list.append(extractor.extract_timestamp(line.strip()))
+            if any(t is not None for t in ts_list):
+                s = pd.Series(ts_list)
+                # Convert float timestamps to pandas datetime
+                timestamps = pd.to_datetime(s.ffill().bfill(), unit='s')
+                print(f"[infer] loaded timestamps for DLT/EWR evaluation")
+    except Exception as e:
+        print(f"[infer] could not load timestamps: {e}")
+
     result_dir = ensure_dir(cfg.get_path("paths.result_dir"))
     dataset = cfg.get("dataset")
     results: dict = {}
@@ -864,10 +887,46 @@ def run(cfg) -> dict:
             np.save(os.path.join(result_dir, f"scores_tac_{name}.npy"), scores)
             if labels and len(labels) == len(scores):
                 print(f"[infer] --- TAC {name} ---")
-                results[f"tac_{name}"] = evaluate(
+                res = evaluate(
                     scores, labels, result_dir=result_dir,
                     tag=f"{dataset}_tac_{name}",
                 )
+                results[f"tac_{name}"] = res
+                
+                # Compute DLT and EWR if timestamps are available
+                if timestamps is not None and len(timestamps) == len(scores):
+                    try:
+                        from .evaluation_metrics import ComprehensiveEvaluator
+                        import json
+                        evaluator = ComprehensiveEvaluator()
+                        comp_report = evaluator.evaluate(
+                            scores=np.array(scores),
+                            labels=np.array(labels),
+                            timestamps=timestamps,
+                            threshold=res['best_threshold']
+                        )
+                        
+                        dlt_summary = comp_report['summary']['early_warning_capability']
+                        print(f"[infer] Early Detection (DLT/EWR): {dlt_summary}")
+                        
+                        report_path = os.path.join(result_dir, f"{dataset}_tac_{name}_early_detection.json")
+                        
+                        def default_serializer(o):
+                            if isinstance(o, pd.Timestamp):
+                                return o.isoformat()
+                            if isinstance(o, np.integer):
+                                return int(o)
+                            if isinstance(o, np.floating):
+                                return float(o)
+                            if isinstance(o, np.ndarray):
+                                return o.tolist()
+                            raise TypeError(f"Type {type(o)} not serializable")
+                            
+                        with open(report_path, "w", encoding="utf-8") as f:
+                            json.dump(comp_report, f, indent=2, default=default_serializer)
+                        print(f"[infer] saved early detection report to {report_path}")
+                    except Exception as e:
+                        print(f"[infer] Early detection evaluation failed: {e}")
 
         # Also run standard LAnoBERT scoring for comparison
         print("[infer] TAC mode: also running baseline LAnoBERT for comparison")
