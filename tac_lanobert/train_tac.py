@@ -257,8 +257,18 @@ def train_tac(cfg, vocab_file: Optional[str] = None) -> str:
     resume = tcfg.get("resume_from_checkpoint", None)
     if resume is False:
         resume = None
+    elif resume is None or resume is True:
+        # Auto-detect latest checkpoint to resume training
+        import glob
+        checkpoints = glob.glob(os.path.join(model_dir, "checkpoint-*"))
+        if len(checkpoints) > 0:
+            resume = True
+            print(f"[train_tac] Found {len(checkpoints)} checkpoints! Will resume from the latest.")
+        else:
+            resume = None
+            print("[train_tac] No checkpoints found. Starting from scratch.")
     
-    print("[train_tac] start" + (f" (resuming from {resume})" if resume else ""))
+    print("[train_tac] start" + (f" (resuming from checkpoint)" if resume else ""))
     trainer.train(resume_from_checkpoint=resume)
 
     final_dir = os.path.join(model_dir, "final")

@@ -1,4 +1,4 @@
-# TAC-LAnoBERT v2 — BGL (2 Epochs for Fair Comparison)
+# TAC-LAnoBERT v2 — BGL (10 Epochs Full Training)
 # 
 # Extends TAC-LAnoBERT with v2 improvements:
 # - Early detection loss (penalty for late detection)
@@ -45,7 +45,7 @@ tokenizer:
 train:
   max_len: 512
   mlm_probability: 0.20
-  num_train_epochs: 2          # 2 epochs (same as baseline!)
+  num_train_epochs: 10          # 10 epochs (Full training)
   per_device_train_batch_size: 32
   gradient_accumulation_steps: 2
   learning_rate: 1.0e-4
@@ -138,10 +138,10 @@ tac_v2:
       - synthetic_sequence       # Generate sequences
     anomaly_injection_rate: 0.3  # 30% of augmented are anomalies
   
-  # Curriculum Learning (disabled for 2 epochs - too short)
+  # Curriculum Learning
   curriculum_learning:
-    enabled: false               # Need 4+ epochs for curriculum
-    phases: [2, 4]               # Would use if enabled
+    enabled: true               # Enabled for 10 epochs
+    phases: [4, 8]              # Phase 1: Easy, Phase 2: Hard, Phase 3: Early Det
   
   # Improved Scoring
   improved_scoring:
@@ -175,5 +175,5 @@ tac_v2:
 # Notes
 # ============================================================================
 # This config extends bgl_tac_full.yaml with v2 improvements
-# Training: 2 epochs (same as baseline for fair comparison)
-# Expected: F1 >0.95 (vs 0.89 baseline), EWR >20% (vs 0%)
+# Training: 10 epochs (Full curriculum learning)
+# Expected: F1 >0.98 (vs 0.89 baseline), EWR >30%

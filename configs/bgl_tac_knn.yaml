@@ -83,7 +83,7 @@ tac:
   # Session Memory Queue with KNN Distance
   memory:
     enabled: true
-    queue_capacity: 512          # NEW: Increased from 128 for better KNN
+    queue_capacity: 1024          # NEW: Increased from 512 for better KNN
     min_samples: 10
     shrinkage_alpha: null
     
@@ -103,7 +103,7 @@ tac:
 
   # Hybrid Proactive Scoring
   scoring:
-    alpha: 0.8                   # 80% MLM, 20% KNN (start conservative)
+    alpha: 0.5                   # 50% MLM, 50% KNN (start conservative)
     threshold: evt
     normalize_scores: true
 
