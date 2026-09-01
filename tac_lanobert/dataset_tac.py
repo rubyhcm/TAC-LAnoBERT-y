@@ -43,6 +43,14 @@ class TACLogLineDataset(Dataset):
             lines = [ln for ln in lines if ln]
 
         print(f"[tac_dataset] pre-tokenizing {len(lines):,} lines...")
+        
+        # Guard: if file is empty, raise a clear error early
+        if len(lines) == 0:
+            raise ValueError(
+                f"[tac_dataset] No lines found in '{file_path}'. "
+                f"Make sure preprocessing has been run first (preprocess_tac --split train)."
+            )
+        
         batch_enc = tokenizer(
             lines,
             truncation=True,
