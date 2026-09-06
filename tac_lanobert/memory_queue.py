@@ -16,6 +16,7 @@ Uses:
 import torch
 import numpy as np
 from typing import Optional, Tuple, Literal
+from sklearn.decomposition import PCA as SklearnPCA
 from dataclasses import dataclass
 
 # Try to import FAISS for KNN support
@@ -76,6 +77,8 @@ class SessionMemoryQueue:
         k_neighbors: int = 10,
         aggregate_method: Literal['mean', 'max', 'harmonic', 'median'] = 'mean',
         use_gpu: bool = False,
+        # PCA dimensionality reduction for KNN (addresses distance concentration)
+        pca_components: Optional[int] = None,
     ):
         self.capacity = capacity
         self.hidden_dim = hidden_dim
@@ -105,6 +108,18 @@ class SessionMemoryQueue:
         self.aggregate_method = aggregate_method
         self.use_gpu = use_gpu and torch.cuda.is_available()
         
+        # ============================================================
+        # PCA Dimensionality Reduction (addresses distance concentration)
+        # Reduces 768-dim → pca_components (e.g. 64) before KNN search
+        # ============================================================
+        self.pca_components = pca_components
+        self._pca: Optional[SklearnPCA] = None
+        self._pca_fitted = False
+        self._pca_buffer: Optional[np.ndarray] = None  # PCA-transformed buffer
+        if pca_components is not None and pca_components < hidden_dim:
+            self._pca_buffer = np.zeros((capacity, pca_components), dtype=np.float32)
+            print(f"  📐 PCA enabled: {hidden_dim} → {pca_components} dims")
+        
         # Initialize FAISS index for KNN if metric is 'knn'
         if distance_metric == 'knn':
             if FAISS_AVAILABLE:
@@ -117,18 +132,58 @@ class SessionMemoryQueue:
             self.faiss_index = None
     
     # ============================================================
-    # NEW: FAISS Index Management for KNN
+    # PCA Management
+    # ============================================================
+    
+    def _fit_pca(self):
+        """Fit PCA on current buffer contents. Called once when buffer is sufficiently full."""
+        if self.pca_components is None or self._pca_fitted:
+            return
+        
+        # Need at least pca_components + 1 samples to fit PCA
+        min_samples_pca = max(self.min_samples, self.pca_components + 1)
+        if self.buffer_size < min_samples_pca:
+            return
+        
+        data = self.buffer[:self.buffer_size] if self.buffer_size < self.capacity else self.buffer
+        n_components = min(self.pca_components, data.shape[0] - 1, data.shape[1])
+        
+        self._pca = SklearnPCA(n_components=n_components)
+        self._pca.fit(data)
+        self._pca_fitted = True
+        
+        explained_var = self._pca.explained_variance_ratio_.sum()
+        print(f"  📐 PCA fitted: {data.shape[1]} → {n_components} dims "
+              f"(explains {explained_var:.1%} variance)")
+        
+        # Transform existing buffer contents
+        transformed = self._pca.transform(data).astype(np.float32)
+        if self.buffer_size < self.capacity:
+            self._pca_buffer[:self.buffer_size] = transformed
+        else:
+            self._pca_buffer[:] = transformed
+    
+    def _pca_transform(self, vector: np.ndarray) -> np.ndarray:
+        """Apply PCA transform to a single vector. Returns original if PCA not fitted."""
+        if self._pca is None or not self._pca_fitted:
+            return vector
+        if vector.ndim == 1:
+            return self._pca.transform(vector.reshape(1, -1)).ravel().astype(np.float32)
+        return self._pca.transform(vector).astype(np.float32)
+    
+    # ============================================================
+    # FAISS Index Management for KNN
     # ============================================================
     
     def _init_faiss_index(self):
         """Initialize FAISS index for fast nearest neighbor search"""
+        # Use PCA dim if available, otherwise full hidden_dim
+        dim = self.pca_components if self.pca_components else self.hidden_dim
         if self.use_gpu:
-            # GPU index
             res = faiss.StandardGpuResources()
-            self.faiss_index = faiss.GpuIndexFlatL2(res, self.hidden_dim)
+            self.faiss_index = faiss.GpuIndexFlatL2(res, dim)
         else:
-            # CPU index with L2 distance
-            self.faiss_index = faiss.IndexFlatL2(self.hidden_dim)
+            self.faiss_index = faiss.IndexFlatL2(dim)
     
     def _rebuild_faiss_index(self):
         """Rebuild FAISS index with current queue contents"""
@@ -138,10 +193,17 @@ class SessionMemoryQueue:
         if self.buffer_size < self.k_neighbors:
             return
         
-        if self.buffer_size < self.capacity:
-            data = self.buffer[:self.buffer_size]
+        # Use PCA-transformed buffer if available
+        if self._pca_fitted and self._pca_buffer is not None:
+            if self.buffer_size < self.capacity:
+                data = self._pca_buffer[:self.buffer_size]
+            else:
+                data = self._pca_buffer
         else:
-            data = self.buffer
+            if self.buffer_size < self.capacity:
+                data = self.buffer[:self.buffer_size]
+            else:
+                data = self.buffer
             
         self.faiss_index.reset()
         self.faiss_index.add(data)
@@ -182,6 +244,15 @@ class SessionMemoryQueue:
         if self._push_count_since_refresh >= self.cache_refresh_interval:
             self._cache_valid = False
             self._push_count_since_refresh = 0
+        
+        # Update PCA-transformed buffer if PCA is fitted
+        if self._pca_fitted and self._pca_buffer is not None:
+            idx = (self.buffer_head - 1) % self.capacity
+            self._pca_buffer[idx] = self._pca_transform(cls_np)
+        
+        # Attempt to fit PCA once we have enough samples
+        if not self._pca_fitted and self.pca_components is not None:
+            self._fit_pca()
         
         # Only rebuild FAISS if explicitly requested and available.
         # Numpy buffer is so fast that we usually avoid FAISS overhead entirely.
@@ -332,14 +403,25 @@ class SessionMemoryQueue:
     
     def _knn_numpy(self, vector: np.ndarray, k: int) -> np.ndarray:
         """KNN search using numpy (blazing fast with ring buffer)"""
-        if self.buffer_size < self.capacity:
-            queue_array = self.buffer[:self.buffer_size]
+        # Use PCA-transformed buffer and vector if available
+        if self._pca_fitted and self._pca_buffer is not None:
+            if self.buffer_size < self.capacity:
+                queue_array = self._pca_buffer[:self.buffer_size]
+            else:
+                queue_array = self._pca_buffer
+            query = self._pca_transform(vector.reshape(1, -1) if vector.ndim == 1 else vector)
+            if query.ndim == 1:
+                query = query.reshape(1, -1)
         else:
-            queue_array = self.buffer
+            if self.buffer_size < self.capacity:
+                queue_array = self.buffer[:self.buffer_size]
+            else:
+                queue_array = self.buffer
+            query = vector
             
         # Compute L2 distances squared (avoid sqrt for speed during partition)
-        # Broadcasting: queue_array is (N, dim), vector is (1, dim)
-        dists_sq = np.sum((queue_array - vector) ** 2, axis=1)
+        # Broadcasting: queue_array is (N, dim), query is (1, dim)
+        dists_sq = np.sum((queue_array - query) ** 2, axis=1)
         
         k_search = min(k, self.buffer_size)
         
@@ -381,6 +463,11 @@ class SessionMemoryQueue:
         self._cached_cov_inv = None
         self._cache_valid = False
         self._push_count_since_refresh = 0
+        # Reset PCA state (will re-fit on next buffer fill)
+        self._pca = None
+        self._pca_fitted = False
+        if self._pca_buffer is not None:
+            self._pca_buffer[:] = 0
     
     def __len__(self) -> int:
         return self.buffer_size

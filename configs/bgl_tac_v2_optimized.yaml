@@ -1,0 +1,193 @@
+# TAC-LAnoBERT v2 — OPTIMIZED Configuration
+# 
+# Based on analysis from outputs/*.md reports:
+# - Uses KNN distance (not Mahalanobis — it failed with AUROC 0.37)
+# - PCA 768→64 dims (addresses distance concentration)
+# - Higher alpha = 0.85 (MLM dominant, KNN as FP suppressor)
+# - Larger queue = 1024 for better KNN coverage
+# - Projection head support (Phase 2)
+#
+# Priority: Early Warning > F1 > FP Reduction
+# Expected: F1 ≥ 0.985, EWR ≥ 30%, FP ≤ 1000
+
+dataset: BGL
+run_name: bgl_tac_v2_optimized
+
+paths:
+  raw_log: data/BGL/BGL.log
+  train_raw: data/BGL/BGL_train_normal.raw
+  test_raw: data/BGL/BGL_test.raw
+  test_label: data/BGL/BGL_test_label.log
+  train_normal: data/BGL/BGL_train_normal_parsed.log
+  test_log: data/BGL/BGL_test_parsed.log
+  test_timestamps: data/BGL/BGL_test_parsed.timestamps
+  tokenizer_dir: outputs/BGL_tac_v2_2epochs/tokenizer    # Reuse existing tokenizer
+  model_dir: outputs/BGL_tac_v2_2epochs/model              # Reuse 10-epoch trained model
+  result_dir: outputs/BGL_tac_v2_optimized/results
+  projection_head: outputs/BGL_tac_v2_optimized/projection_head.pt  # Phase 2
+
+split:
+  method: line
+  train_ratio: 0.8
+  label_marker: "-"
+
+preprocess:
+  regex_profile: bgl
+  mask_block_id: true
+  mask_ip: true
+  mask_number: true
+  drop_header_fields: 3
+
+tokenizer:
+  vocab_size: 1000
+  min_frequency: 2
+  lowercase: false
+
+train:
+  max_len: 512
+  mlm_probability: 0.20
+  num_train_epochs: 10
+  per_device_train_batch_size: 32
+  gradient_accumulation_steps: 2
+  learning_rate: 1.0e-4
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  save_steps: 5000
+  save_total_limit: 2
+  logging_steps: 200
+  seed: 42
+  eval_ratio: 0.01
+  fp16: true
+  bf16: false
+  attn_implementation: sdpa
+
+inference:
+  hf_model: null
+  hf_subfolder: null
+  score: mean
+  top_k: 5
+  top_ks: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+  batch_size: 16
+  max_eval_samples: null
+  pretrained_model: null
+
+# ============================================================================
+# TAC-LAnoBERT Configuration — OPTIMIZED
+# ============================================================================
+tac:
+  enabled: true
+  mode: full
+
+  time2vec:
+    enabled: true
+    num_periodic: 15
+
+  # Session Memory Queue — KNN with PCA
+  memory:
+    enabled: true
+    queue_capacity: 1024              # Larger queue for better KNN coverage
+    min_samples: 10
+    shrinkage_alpha: null
+    distance_metric: 'knn'            # KNN (not Mahalanobis!)
+    k_neighbors: 10
+    aggregate_method: 'mean'
+    use_gpu: false
+    # NEW: PCA dimensionality reduction
+    pca_components: 64                # 768 → 64 dims (>90% variance retained)
+
+  # Hybrid Scoring — MLM dominant
+  scoring:
+    alpha: 0.85                       # 85% MLM, 15% KNN (was 0.5)
+    threshold: evt
+    normalize_scores: true
+
+  # EVT/POT Dynamic Threshold
+  threshold:
+    method: evt
+    q: 0.98
+    fallback_percentile: 99.5
+
+# ============================================================================
+# TAC-LAnoBERT v2 Improvements
+# ============================================================================
+tac_v2:
+  enabled: true
+  
+  early_detection_loss:
+    enabled: true
+    penalty_weight: 2.0
+    smoothness_weight: 0.1
+    lead_time_target: 300
+
+  temporal_features:
+    enabled: true
+    features:
+      - hour_of_day
+      - day_of_week
+      - weekend
+      - event_rate_5min
+      - event_rate_1hour
+      - time_since_start
+      - time_delta
+
+  data_augmentation:
+    enabled: true
+    ratio: 0.1
+    methods:
+      - token_replacement
+      - token_shuffling
+      - temporal_anomaly
+      - template_mixing
+      - synthetic_sequence
+    anomaly_injection_rate: 0.3
+
+  curriculum_learning:
+    enabled: true
+    phases: [4, 8]
+
+  improved_scoring:
+    enabled: true
+    use_adaptive_alpha: true
+    alpha_init: 0.85                  # Start high (MLM dominant)
+    use_pca: true
+    pca_components: 64
+    covariance_method: oas
+
+  threshold_optimization:
+    enabled: true
+    method: early_detection           # Prioritize EWR
+    target_fpr: 0.01
+    min_lead_time: 300
+
+  # Phase 2: Projection Head
+  projection_head:
+    enabled: false                    # Set to true after Phase 2 training
+    input_dim: 768
+    hidden_dim: 256
+    output_dim: 64
+    checkpoint: null                  # Will be set to projection_head.pt
+
+  evaluation:
+    compute_standard: true
+    compute_dlt: true
+    dlt_intervals: [60, 300, 900, 3600]
+    compute_roi: true
+    cost_per_fp: 100
+    value_per_early_detection: 1400
+    downtime_cost_per_hour: 10000
+    compute_alert_fatigue: true
+    window_sizes: ["30min", "1h", "6h"]
+
+# ============================================================================
+# Notes
+# ============================================================================
+# Reuses the 10-epoch trained model (no retraining needed for Phase 1)
+# Key changes vs bgl_tac_knn.yaml:
+#   - alpha: 0.5 → 0.85 (MLM dominant)
+#   - pca_components: null → 64 (KNN in reduced space)
+#   - queue_capacity: 1024 (same as KNN config)
+#
+# Expected improvement from alpha=0.85:
+#   - F1: 0.912 → ≥0.985
+#   - FP: 4,806 → ≤1,000  
+#   - EWR: 32.94% → ≥30% (maintained)
