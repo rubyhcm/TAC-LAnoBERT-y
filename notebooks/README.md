@@ -253,9 +253,49 @@ outputs/
 
 ## 🐛 Troubleshooting
 
+### ❌ "File NOT FOUND" Errors
+
+**Common Issue**: BGL data files not found in `data/BGL/`
+
+**Solution**:
+1. **Run Debug Cell First** (in `1_tac_v2_optimized.ipynb`)
+   - Execute **Section 2.1: Debug - Show Kaggle Input Structure**
+   - This shows exactly where your files are located
+   
+2. **Check Dataset Structure**:
+   ```
+   Expected in Kaggle input:
+   📦 your-dataset-name/
+      └── 📁 BGL/
+          ├── 📄 BGL_test_parsed.log
+          ├── 📄 BGL_test_label.log
+          ├── 📄 BGL_test_parsed.timestamps
+          └── ... other files
+   ```
+
+3. **Auto-Fix**: 
+   - Section 2.2 will automatically detect and copy files
+   - If auto-fix fails, check debug output for actual paths
+   - Manually adjust `copy_from_kaggle_input()` patterns if needed
+
+4. **Manual Fix** (if auto-fix doesn't work):
+   ```python
+   # In Kaggle notebook, manually copy:
+   import shutil
+   shutil.copytree('/kaggle/input/YOUR-DATASET/BGL', 'data/BGL')
+   ```
+
+**Why this happens**:
+- Kaggle datasets can have different structures
+- Files might be nested differently than expected
+- Dataset names vary between uploads
+
+---
+
 ### "Model not found"
 - For Phase 1/2: Attach `BGL_tac_v2_2epochs` dataset in Kaggle
 - Or run `tac_v2_training.ipynb` first
+- Check debug output to see if model files are in input
 
 ### "Out of memory"
 - Reduce `batch_size` in config
